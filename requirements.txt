@@ -1,0 +1,8 @@
+streamlit==1.52.1
+akshare==1.18.94
+openai==3.8.0
+pandas==2.3.3
+numpy==2.3.1
+plotly==6.3.1
+python-dotenv==1.0.1
+requests==2.32.3
