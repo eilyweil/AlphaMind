@@ -210,12 +210,12 @@ def run_enhanced_backtest(close, open_, bench, constituents, names=None, top_n=3
     open_ = open_[codes].astype(float)
 
     mom = close.shift(skip_recent) / close.shift(lookback) - 1
-    vol = close.pct_change(fill_method="pad").rolling(vol_window).std()
+    vol = close.ffill().pct_change(fill_method=None).rolling(vol_window).std()
     comp = _cross_section_zscore(mom) + vol_weight * _cross_section_zscore(-vol)
 
     bench_s = bench.set_index("date")["close"] if "date" in bench.columns else bench["close"]
     bench_s = bench_s.reindex(close.index).ffill()
-    bench_ret = bench_s.pct_change(fill_method="pad")
+    bench_ret = bench_s.pct_change(fill_method=None)
 
     rebalances = _monthly_rebalances(close.index)
 
