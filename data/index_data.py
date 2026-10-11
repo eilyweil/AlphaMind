@@ -22,10 +22,27 @@ class CurrentConstituentsProvider:
 
     def _load(self):
         if self._codes is None:
-            import akshare as ak
-            df = ak.index_stock_cons_csindex(symbol=self.symbol)
-            self._codes = [str(c).zfill(6) for c in df["成分券代码"]]
-            self._names = dict(zip(self._codes, df["成分券名称"]))
+            # 成分股名单也落盘缓存，避免多次 _factor_panel 反复请求中证官网（易被限流断开）
+            data = cache.load(f"index_cons_{self.symbol}")
+            if data is None:
+                import time
+                import akshare as ak
+                last_err = None
+                for attempt in range(3):
+                    try:
+                        df = ak.index_stock_cons_csindex(symbol=self.symbol)
+                        codes = [str(c).zfill(6) for c in df["成分券代码"]]
+                        names = dict(zip(codes, df["成分券名称"]))
+                        data = {"codes": codes, "names": names}
+                        cache.save(f"index_cons_{self.symbol}", data)
+                        break
+                    except Exception as ex:  # noqa: BLE001
+                        last_err = ex
+                        time.sleep(1.0)
+                else:
+                    raise last_err
+            self._codes = data["codes"]
+            self._names = data["names"]
         return self._codes, self._names
 
     def get_constituents(self, date=None) -> list:

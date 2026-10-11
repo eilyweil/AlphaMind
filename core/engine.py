@@ -8,7 +8,8 @@ import datetime as dt
 import pandas as pd
 
 from ai.client import chat, chat_json
-from ai.prompts import SYSTEM, build_assistant_prompt, build_backtest_prompt
+from ai.prompts import SYSTEM, build_assistant_prompt, build_backtest_prompt, \
+    build_factor_backtest_interpretation_prompt
 from analysis import backtest as bt
 from analysis import factor_backtest as ft
 from analysis import find_col
@@ -18,6 +19,9 @@ from analysis import sentiment as sent_mod
 from analysis import valuation as val_mod
 from data import index_data
 from data.akshare_provider import get_provider
+
+# 动量窗口 → (lookback 交易日, skip_recent 交易日)
+_WINDOW_MAP = {"3-1": (63, 21), "6-1": (126, 21), "12-1": (252, 21), "12-6": (252, 126)}
 
 
 class ResearchEngine:
@@ -153,8 +157,7 @@ class ResearchEngine:
         names, constituents, bench, close, open_ = self._factor_panel(start, end, progress, benchmark)
         if close.empty or bench.empty:
             return None
-        windows = {"6-1": (126, 21), "12-1": (252, 21), "12-6": (252, 126)}
-        lookback, skip = windows.get(window, (252, 21))
+        lookback, skip = _WINDOW_MAP.get(window, (252, 21))
         if strategy == "momentum":
             res = ft.run_factor_backtest(
                 close, open_, bench, constituents, names=names,
@@ -186,8 +189,7 @@ class ResearchEngine:
         names, constituents, bench, close, open_ = self._factor_panel(start, end, progress, benchmark)
         if close.empty or bench.empty:
             return None
-        windows = {"6-1": (126, 21), "12-1": (252, 21), "12-6": (252, 126)}
-        lookback, skip = windows.get(window, (252, 21))
+        lookback, skip = _WINDOW_MAP.get(window, (252, 21))
         out = {}
         for slip_bp in [0, 15, 30, 50]:
             if strategy == "momentum":
@@ -211,6 +213,116 @@ class ResearchEngine:
                 "夏普": m["夏普比率"], "年化": m["年化收益率"], "最大回撤": m["最大回撤"],
             }
         return out
+
+    def factor_backtest_heatmap(self, start: str = "2015-01-01", end: str = "2025-12-31",
+                                top_ns=(20, 30, 40, 60, 80), windows=("3-1", "12-1"),
+                                initial_wan: float = 100, progress=None,
+                                benchmark: str = "total_return", strategy: str = "enhanced",
+                                vol_target: float = 0.15) -> dict:
+        """夏普热力图：选股数 × 动量窗口 的参数稳健性扫描（面板只拉一次）。
+
+        判读要点：寻找连续高值区域（平原）而非单个最高点——孤立尖峰≈过拟合，连续高原≈稳健。
+        """
+        names, constituents, bench, close, open_ = self._factor_panel(start, end, progress, benchmark)
+        if close.empty or bench.empty:
+            return None
+        start_dt, end_dt = pd.to_datetime(start), pd.to_datetime(end)
+        rows = []
+        for tn in top_ns:
+            for w in windows:
+                lookback, skip = _WINDOW_MAP.get(w, (252, 21))
+                if strategy == "momentum":
+                    res = ft.run_factor_backtest(
+                        close, open_, bench, constituents, names=names, top_n=tn,
+                        lookback=lookback, skip_recent=skip, initial=initial_wan * 1e4)
+                else:
+                    res = ft.run_enhanced_backtest(
+                        close, open_, bench, constituents, names=names, top_n=tn,
+                        lookback=lookback, skip_recent=skip, initial=initial_wan * 1e4,
+                        vol_target=vol_target)
+                nav = res["nav"]
+                nav = nav[(nav["date"] >= start_dt) & (nav["date"] <= end_dt)]
+                if nav.empty:
+                    rows.append({"选股数": tn, "动量窗口": w, "夏普": float("nan"),
+                                 "年化超额": float("nan"), "最大回撤": float("nan")})
+                    continue
+                m = ft._compute_metrics(nav.set_index("date"), initial_wan * 1e4, res["turnover_sell"])
+                rows.append({"选股数": tn, "动量窗口": w, "夏普": m["夏普比率"],
+                             "年化超额": m["年化超额"], "最大回撤": m["最大回撤"]})
+        df = pd.DataFrame(rows)
+        mat = df.pivot(index="选股数", columns="动量窗口", values="夏普")
+        return {"rows": df, "matrix": mat}
+
+    def factor_backtest_walkforward(self, start: str = "2015-01-01", end: str = "2025-12-31",
+                                    top_n: int = 30, window: str = "12-1",
+                                    initial_wan: float = 100, progress=None,
+                                    benchmark: str = "total_return", strategy: str = "enhanced",
+                                    vol_target: float = 0.15) -> dict:
+        """滚动 walk-forward：训练窗 3 年 / 测试窗 6 个月 / 步进 6 个月（固定参数）。
+
+        每轮在 6 个月测试窗上算年化超额 / 夏普 / Calmar / 月胜率，用于「后半段是否塌陷」的稳健性判读。
+        """
+        names, constituents, bench, close, open_ = self._factor_panel(start, end, progress, benchmark)
+        if close.empty or bench.empty:
+            return None
+        lookback, skip = _WINDOW_MAP.get(window, (252, 21))
+        bench_s = bench.set_index("date")["close"] if "date" in bench.columns else bench["close"]
+
+        start_dt, end_dt = pd.to_datetime(start), pd.to_datetime(end)
+        rounds = []
+        t = start_dt + pd.DateOffset(years=3)  # 首轮测试窗起点 = start + 3 年训练窗
+        idx = 1
+        while t < end_dt:
+            t_end = min(t + pd.DateOffset(months=6), end_dt)
+            pre = t - pd.DateOffset(days=400)  # 预热，保证动量/波动率可算
+            sub_close = close[(close.index >= pre) & (close.index <= t_end)]
+            sub_open = open_[(open_.index >= pre) & (open_.index <= t_end)]
+            sub_bench = bench_s[(bench_s.index >= pre) & (bench_s.index <= t_end)].reset_index()
+            if sub_close.empty or sub_bench.empty or len(sub_close) < 40:
+                t += pd.DateOffset(months=6)
+                idx += 1
+                continue
+            if strategy == "momentum":
+                res = ft.run_factor_backtest(
+                    sub_close, sub_open, sub_bench, constituents, names=names, top_n=top_n,
+                    lookback=lookback, skip_recent=skip, initial=initial_wan * 1e4)
+            else:
+                res = ft.run_enhanced_backtest(
+                    sub_close, sub_open, sub_bench, constituents, names=names, top_n=top_n,
+                    lookback=lookback, skip_recent=skip, initial=initial_wan * 1e4,
+                    vol_target=vol_target)
+            nav = res["nav"]
+            nav = nav[(nav["date"] >= t) & (nav["date"] <= t_end)]
+            if nav.empty or len(nav) < 30:
+                t += pd.DateOffset(months=6)
+                idx += 1
+                continue
+            m = ft._compute_metrics(nav.set_index("date"), initial_wan * 1e4, res["turnover_sell"])
+            rounds.append({
+                "轮次": idx, "测试区间": f"{t:%Y-%m}~{t_end:%Y-%m}",
+                "年化超额": m["年化超额"], "夏普": m["夏普比率"],
+                "Calmar": m["Calmar"], "月胜率": m["月胜率"],
+            })
+            t += pd.DateOffset(months=6)
+            idx += 1
+        if not rounds:
+            return None
+        rounds_df = pd.DataFrame(rounds)
+        rubric = ft.walkforward_rubric(rounds_df)
+        return {"rounds": rounds_df, "rubric": rubric, "window": window, "top_n": top_n}
+
+    def factor_backtest_interpretation(self, result: dict) -> str:
+        """回测指标摘要 → AI 大白话四段解读（只传结构化数字，不传原始行情）。"""
+        m = result["metrics"]
+        summary = (
+            f"年化超额 {m['年化超额'] * 100:+.2f}%，年化收益率 {m['年化收益率'] * 100:+.2f}%，"
+            f"夏普 {m['夏普比率']:.2f}，最大回撤 {m['最大回撤'] * 100:.2f}%"
+            f"（基准 {m['基准最大回撤'] * 100:.2f}%），Calmar {m['Calmar']:.2f}，"
+            f"月胜率 {m['月胜率'] * 100:.1f}%（基准正收益月占比 {m['基准月胜率'] * 100:.1f}%），"
+            f"年化波动 {m['年化波动'] * 100:.2f}%，单边年换手 {m['单边年换手']:.1f} 倍。"
+        )
+        strategy_label = "多因子增强" if result.get("strategy", "enhanced") == "enhanced" else "经典 12-1 动量"
+        return chat(build_factor_backtest_interpretation_prompt(strategy_label, summary))
 
     # ---------- 综合研判（AI 研报助手） ----------
     def report(self, code: str, question: str) -> dict:

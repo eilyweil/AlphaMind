@@ -3,7 +3,6 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from analysis import backtest as bt
-from analysis import factor_backtest as ft
 from core.engine import get_engine
 
 _PERIODS = {"近 1 年": 365, "近 2 年": 730, "近 3 年": 1095, "近 5 年": 1825}
@@ -191,46 +190,93 @@ def _factor_sens_chart(sens: dict) -> go.Figure:
     return fig
 
 
-def _render_factor_result(res: dict, sens=None, benchmark: str = "total_return"):
+def _verdict_text(m: dict) -> str:
+    """结论卡的一句话判读。"""
+    ex = m["年化超额"]
+    s = f"跑赢基准 {ex * 100:+.1f} 个百分点" if ex >= 0 else f"跑输基准 {abs(ex) * 100:.1f} 个百分点"
+    dd, ddb = m["最大回撤"], m["基准最大回撤"]
+    if ddb is not None and ddb < -1e-6:
+        s += f" · 回撤约为基准的 {dd / ddb * 100:.0f}%"
+    return s + "。"
+
+
+def _conclusion_card(m: dict) -> str:
+    """结论卡：突出年化超额 + 三个核心数 + 一句话判读（复用设计 token）。"""
+    ex = m["年化超额"]
+    color = "var(--up)" if ex >= 0 else "var(--down)"
+    ex_str = f"{ex * 100:+.1f}%"
+    return (
+        '<div style="background:var(--surface);border:1px solid var(--line);'
+        'border-left:3px solid var(--accent);border-radius:12px;'
+        'padding:1.1rem 1.3rem;margin:.2rem 0 .8rem;">'
+        '<div style="display:flex;align-items:baseline;gap:.7rem;flex-wrap:wrap;">'
+        f'<span style="font-size:2.3rem;font-weight:700;color:{color};letter-spacing:-.02em;line-height:1;">{ex_str}</span>'
+        '<span style="color:var(--ink-2);font-size:.92rem;">年化超额（vs 基准）</span>'
+        '</div>'
+        '<div style="margin-top:.6rem;display:flex;gap:1.8rem;flex-wrap:wrap;">'
+        f'<span style="color:var(--ink-3);font-size:.78rem;">夏普 <b style="color:var(--ink);font-size:.95rem;">{m["夏普比率"]:.2f}</b></span>'
+        f'<span style="color:var(--ink-3);font-size:.78rem;">最大回撤 <b style="color:var(--ink);font-size:.95rem;">{m["最大回撤"] * 100:.1f}%</b></span>'
+        f'<span style="color:var(--ink-3);font-size:.78rem;">年化收益率 <b style="color:var(--ink);font-size:.95rem;">{m["年化收益率"] * 100:+.1f}%</b></span>'
+        '</div>'
+        '<div style="margin-top:.65rem;padding-top:.6rem;border-top:1px solid var(--line);'
+        f'color:var(--ink-2);font-size:.84rem;">{_verdict_text(m)}</div>'
+        '</div>'
+    )
+
+
+def _render_robustness(ctx: dict):
+    """稳健性检验：walk-forward 滚动回测（结果随回测直接展示）。"""
+    wf = ctx.get("walkforward")
+    if wf is None:
+        return
+    with st.expander("稳健性检验", expanded=True):
+        st.caption("walk-forward 看后半段超额是否塌陷（塌陷≈动量失效或过拟合）。")
+        rub = wf["rubric"]
+        st.markdown(f"**Walk-forward 判读：{rub['verdict']}**")
+        with st.expander("查看各轮明细", expanded=False):
+            show = wf["rounds"].copy()
+            for col in ["年化超额", "月胜率"]:
+                show[col] = (show[col] * 100).round(1)
+            show["夏普"] = show["夏普"].round(2)
+            show["Calmar"] = show["Calmar"].round(2)
+            st.dataframe(show, hide_index=True, width="stretch")
+            for mark, desc in rub["observations"]:
+                st.markdown(f"{mark} {desc}")
+
+
+def _render_factor_result(ctx: dict):
+    res = ctx["res"]
+    sens = ctx.get("sens")
+    benchmark = ctx.get("benchmark", "total_return")
     m = res["metrics"]
     total_return = benchmark == "total_return"
-    bench_label = "沪深300全收益" if total_return else "沪深300"
+    bench_label = "基准"
     strategy = res.get("strategy", "enhanced")
-    if strategy == "enhanced":
-        st.markdown("**策略：多因子增强** —— 质量动量（动量+低波）选股 · 趋势风控 · 波动率目标")
-    else:
-        st.markdown("**策略：经典 12-1 动量** —— 纯动量，等权持有")
-    st.markdown("#### 指标汇总")
-    c1 = st.columns(4)
-    c1[0].metric("年化超额", _pct(m["年化超额"]))
-    c1[1].metric("年化收益率", _pct(m["年化收益率"]))
-    c1[2].metric("夏普比率", f"{m['夏普比率']:.2f}")
-    c1[3].metric("最大回撤", f"{m['最大回撤'] * 100:.2f}%")
+
+    st.caption(
+        "策略：" + ("多因子增强 · 动量+低波 · 趋势风控 · 波动率目标"
+                    if strategy == "enhanced" else "经典 12-1 动量 · 纯动量等权")
+    )
+    st.markdown(_conclusion_card(m), unsafe_allow_html=True)
+
     c2 = st.columns(4)
     c2[0].metric("年化波动", f"{m['年化波动'] * 100:.2f}%")
     c2[1].metric("Calmar", f"{m['Calmar']:.2f}")
     c2[2].metric("月胜率", f"{m['月胜率'] * 100:.1f}%")
     c2[3].metric("单边年换手", f"{m['单边年换手']:.1f} 倍")
-    if total_return:
-        st.caption("基准为沪深300全收益指数(H00300，含股息再投)，与策略前复权口径一致。首末年份为不完整年度。")
-    else:
-        st.caption("基准为沪深300价格指数(000300)；策略按前复权含股息再投，超额含约2%/年的股息口径差。首末年份为不完整年度。")
+    conc = "收益集中于少数月份" if m["月收益集中度"] > 1.0 else f"前 5 月贡献 {m['月收益集中度'] * 100:.0f}% 收益"
+    st.caption(
+        f"月胜率 {m['月胜率'] * 100:.1f}%（随机基准 {m['基准月胜率'] * 100:.1f}%）· {conc} · "
+        + ("基准：全收益 H00300" if total_return else "基准：价格指数 000300（约 2%/年股息口径差）")
+    )
 
-    checks = ft.pass_fail(m)
-    passed = sum(1 for _, ok in checks if ok)
-    verdict = "✅ 通过" if passed == len(checks) else f"❌ 未通过（{passed}/{len(checks)}）"
-    st.markdown(f"**结论：{verdict}**")
-    for desc, ok in checks:
-        st.markdown(f"{'✅' if ok else '❌'} {desc}")
-
-    st.subheader(f"净值曲线（对数轴 · 策略 vs {bench_label}）")
-    st.plotly_chart(_factor_nav_chart(res["nav"], log=True, bench_label=bench_label), width="stretch")
-
-    st.subheader("累计超额收益")
-    st.plotly_chart(_factor_excess_chart(res["nav"]), width="stretch")
-
-    st.subheader(f"回撤（策略 vs {bench_label}）")
-    st.plotly_chart(_factor_dd_chart(res["nav"], bench_label=bench_label), width="stretch")
+    tab_nav, tab_ex, tab_dd = st.tabs(["净值", "超额", "回撤"])
+    with tab_nav:
+        st.plotly_chart(_factor_nav_chart(res["nav"], log=True, bench_label=bench_label), width="stretch")
+    with tab_ex:
+        st.plotly_chart(_factor_excess_chart(res["nav"]), width="stretch")
+    with tab_dd:
+        st.plotly_chart(_factor_dd_chart(res["nav"], bench_label=bench_label), width="stretch")
 
     st.subheader("分年度收益")
     ann = res["annual"].copy()
@@ -239,42 +285,54 @@ def _render_factor_result(res: dict, sens=None, benchmark: str = "total_return")
     st.dataframe(ann, hide_index=True, width="stretch")
 
     if sens:
-        st.subheader("成本敏感性（四档滑点 0/15/30/50 bp）")
+        st.subheader("成本敏感性（0/15/30/50 bp）")
         st.plotly_chart(_factor_sens_chart(sens), width="stretch")
         rows = [{"滑点(bp)": bp, "夏普": f"{it['夏普']:.2f}",
                  "年化": _pct(it["年化"]), "最大回撤": f"{it['最大回撤'] * 100:.2f}%"}
                 for bp, it in sens.items()]
         st.dataframe(rows, hide_index=True, width="stretch")
 
+    _render_robustness(ctx)
+
+    st.subheader("AI 解读")
+    if st.button("生成 AI 解读", key="factor_ai"):
+        with st.spinner("AI 分析中…"):
+            try:
+                answer = get_engine().factor_backtest_interpretation(res)
+            except Exception as ex:  # noqa: BLE001
+                st.error(f"AI 调用失败：{ex}")
+                answer = None
+        if answer:
+            st.markdown(answer)
+
 
 def _render_factor():
-    st.markdown("#### 沪深300 截面组合（月频 · 等权 · 真实成本）")
-    st.caption("月末按因子排序选前 N 只，次月首日开盘等权买入。数据为当前成分近似（含幸存者偏差），结论口径已注明。")
+    with st.expander("回测参数", expanded=False):
+        st.caption("月末按因子排序选前 N 只，次月开盘等权买入；数据为当前成分近似，含幸存者偏差。")
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            strategy_label = st.selectbox("策略", list(_STRATEGIES.keys()))
+        with c2:
+            top_n = st.selectbox("选股数", [20, 30, 50], index=1)
+        with c3:
+            window = st.selectbox("动量窗口", list(_WINDOWS.keys()))
 
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        strategy_label = st.selectbox("策略", list(_STRATEGIES.keys()))
-    with c2:
-        top_n = st.selectbox("选股数", [20, 30, 50], index=1)
-    with c3:
-        window = st.selectbox("动量窗口", list(_WINDOWS.keys()))
+        c4, c5, c6 = st.columns(3)
+        with c4:
+            benchmark_label = st.selectbox("基准口径", list(_BENCHMARKS.keys()))
+        with c5:
+            risk_label = st.selectbox("风险偏好", list(_RISK.keys()), index=1)
+        with c6:
+            initial_wan = st.number_input("初始资金（万元）", 10, 10000, 100, step=10)
 
-    c4, c5, c6 = st.columns(3)
-    with c4:
-        benchmark_label = st.selectbox("基准口径", list(_BENCHMARKS.keys()))
-    with c5:
-        risk_label = st.selectbox("风险偏好", list(_RISK.keys()), index=1)
-    with c6:
-        initial_wan = st.number_input("初始资金（万元）", 10, 10000, 100, step=10)
+        sensitivity = st.checkbox("同时跑四档成本敏感性（0/15/30/50 bp）", value=True)
 
     strategy = _STRATEGIES[strategy_label]
     benchmark = _BENCHMARKS[benchmark_label]
     vol_target = _RISK[risk_label]
 
-    sensitivity = st.checkbox("同时跑四档成本敏感性（0/15/30/50 bp）", value=False)
-
     if st.button("开始回测", type="primary", key="run_factor"):
-        with st.spinner("拉取沪深300成分股历史行情并回测（首次约几分钟，之后缓存秒开）…"):
+        with st.spinner("拉取成分股历史行情并回测（首次约几分钟，之后缓存秒开）…"):
             bar = st.progress(0.0, text="拉取历史行情…")
 
             def prog(done, total):
@@ -293,6 +351,10 @@ def _render_factor():
                         window=_WINDOWS[window], initial_wan=initial_wan, progress=prog,
                         benchmark=benchmark, strategy=strategy, vol_target=vol_target,
                     )
+                # 稳健性检验随结果一并算好，直接展示（无按钮）
+                walkforward = get_engine().factor_backtest_walkforward(
+                    _FACTOR_START, _FACTOR_END, top_n=top_n, window=_WINDOWS[window],
+                    benchmark=benchmark, strategy=strategy, vol_target=vol_target, initial_wan=initial_wan)
             except Exception as ex:  # noqa: BLE001
                 st.error(f"回测失败：{ex}")
                 bar.empty()
@@ -302,18 +364,20 @@ def _render_factor():
         if result is None:
             st.warning("数据不足，无法回测")
             return
-        st.session_state["factor_bt"] = {"res": result, "sens": sens, "benchmark": benchmark}
+        st.session_state["factor_bt"] = {
+            "res": result, "sens": sens, "benchmark": benchmark,
+            "strategy": strategy, "top_n": top_n, "window": _WINDOWS[window],
+            "vol_target": vol_target, "initial_wan": initial_wan,
+            "walkforward": walkforward,
+        }
 
     if "factor_bt" in st.session_state:
-        _render_factor_result(
-            st.session_state["factor_bt"]["res"], st.session_state["factor_bt"]["sens"],
-            st.session_state["factor_bt"].get("benchmark", "total_return"),
-        )
+        _render_factor_result(st.session_state["factor_bt"])
 
 
 def render(code: str):
-    mode = st.radio("回测模式", ["技术指标（个股）", "因子动量（沪深300）"], horizontal=True)
-    if mode == "因子动量（沪深300）":
+    mode = st.radio("回测模式", ["技术指标（个股）", "因子动量"], horizontal=True)
+    if mode == "因子动量":
         _render_factor()
     else:
         _render_technical(code)

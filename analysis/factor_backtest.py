@@ -275,6 +275,14 @@ def _compute_metrics(nav_df: pd.DataFrame, initial: float, total_sell: float) ->
     common = sm.index.intersection(bm.index)
     win = float((sm.loc[common] > bm.loc[common]).mean()) if len(common) else 0.0
 
+    # 随机基准：基准月度正收益占比（≈55–60%），用于对照「月胜率」是否真有信息量
+    bench_win = float((bm > 0).mean()) if len(bm) else 0.0
+    # 收益集中度：前 5 个月收益占全部月收益之和的比（>1 表示收益高度集中于少数月份）
+    if len(sm) and sm.sum() > 0:
+        concentration = float(sm.sort_values(ascending=False).head(5).sum() / sm.sum())
+    else:
+        concentration = 0.0
+
     avg_eq = float(s.mean())
     turn_oneway = total_sell / avg_eq / years if avg_eq > 0 and years > 0 else 0.0
 
@@ -290,6 +298,8 @@ def _compute_metrics(nav_df: pd.DataFrame, initial: float, total_sell: float) ->
         "基准最大回撤": max_dd_b,
         "Calmar": float(calmar),
         "月胜率": win,
+        "基准月胜率": bench_win,
+        "月收益集中度": concentration,
         "单边年换手": float(turn_oneway),
         "回测天数": n,
         "期末资金": float(s.iloc[-1]),
@@ -319,3 +329,92 @@ def pass_fail(metrics: dict) -> list:
         ("月胜率 > 55%", m.get("月胜率", -9) > 0.55),
         ("单边年换手 < 12 倍", m.get("单边年换手", 99) < 12.0),
     ]
+
+
+def _fmt_pct(v):
+    return f"{v * 100:.2f}%" if v is not None else "-"
+
+
+def pass_fail_detail(metrics: dict) -> list:
+    """门检明细（含实际值 vs 阈值），返回 [(描述, 是否通过, 实际值文本, 阈值文本), ...]。
+
+    用于 UI 完整展示每条判定条件的实际结果，尤其「最大回撤 < 基准回撤」需先算出基准自身回撤。
+    """
+    m = metrics
+    ex = m.get("年化超额")
+    vol = m.get("年化波动")
+    sp = m.get("夏普比率")
+    dd = m.get("最大回撤")
+    ddb = m.get("基准最大回撤")
+    cal = m.get("Calmar")
+    win = m.get("月胜率")
+    to = m.get("单边年换手")
+    return [
+        ("年化超额 > 3%", (ex if ex is not None else -9) > 0.03, _fmt_pct(ex), "3%"),
+        ("年化波动 < 30%", (vol if vol is not None else 9) < 0.30, _fmt_pct(vol), "30%"),
+        ("夏普 > 0.5", (sp if sp is not None else -9) > 0.5, f"{sp:.2f}" if sp is not None else "-", "0.5"),
+        ("最大回撤 < 基准回撤", (dd if dd is not None else -9) > (ddb if ddb is not None else -1),
+         _fmt_pct(dd), _fmt_pct(ddb)),
+        ("Calmar > 0.5", (cal if cal is not None else -9) > 0.5, f"{cal:.2f}" if cal is not None else "-", "0.5"),
+        ("月胜率 > 55%", (win if win is not None else -9) > 0.55, _fmt_pct(win), "55%"),
+        ("单边年换手 < 12 倍", (to if to is not None else 99) < 12.0, f"{to:.1f} 倍" if to is not None else "-", "12 倍"),
+    ]
+
+
+def walkforward_rubric(rounds: pd.DataFrame) -> dict:
+    """根据 walk-forward 各轮结果给出稳健性判读（对应评审要点 4–8）。
+
+    rounds: DataFrame，列含 轮次 / 年化超额 / 夏普 / Calmar / 月胜率。
+    返回 {'observations': [(标记, 描述), ...], 'rating': 6.5|4.0, 'verdict': str}。
+    """
+    obs = []
+    rating = 6.5
+
+    def _val(r, k):
+        v = r.get(k)
+        return v if pd.notna(v) else None
+
+    def _excess(i):
+        for _, r in rounds.iterrows():
+            if r["轮次"] == i:
+                return _val(r, "年化超额")
+        return None
+
+    def _r(v):
+        return f"{v * 100:.1f}%" if v is not None else "缺失"
+
+    # 4 / 5. 全期夏普稳健区间（用各轮夏普均值近似全期水平）
+    sharps = [_val(r, "夏普") for _, r in rounds.iterrows() if _val(r, "夏普") is not None]
+    if sharps:
+        avg_sharpe = float(np.mean(sharps))
+        if 0.75 <= avg_sharpe <= 0.95:
+            obs.append(("✅ 稳健", f"各轮夏普均值 {avg_sharpe:.2f} 落在 0.75–0.95 稳健区间，策略成立"))
+        elif avg_sharpe < 0.6 or avg_sharpe > 1.2:
+            obs.append(("⚠️ 参数拟合", f"各轮夏普均值 {avg_sharpe:.2f} 脱离稳健区间（<0.6 或 >1.2），疑似参数拟合，评级由 6.5 下调至 4"))
+            rating = 4.0
+        else:
+            obs.append(("🟡 边缘", f"各轮夏普均值 {avg_sharpe:.2f} 处于 0.6–1.2 非极端区间，需结合各轮表现综合判断"))
+
+    # 6. 第 2、3 轮年化超额 ≥ 3%
+    r2, r3 = _excess(2), _excess(3)
+    if r2 is not None and r3 is not None and r2 >= 0.03 and r3 >= 0.03:
+        obs.append(("✅ 及格线守住", f"第 2、3 轮年化超额 {_r(r2)} / {_r(r3)} 均 ≥3%"))
+    else:
+        obs.append(("⚠️ 及格线失守", f"第 2、3 轮年化超额未同时 ≥3%（{_r(r2)} / {_r(r3)}）"))
+
+    # 7. 第 4 轮超额跌至 3% 以下 → 超额高度绑定动量窗口
+    r4 = _excess(4)
+    if r4 is not None and r4 < 0.03:
+        obs.append(("🔴 超额绑定窗口", f"第 4 轮年化超额 {_r(r4)} 跌至 3% 以下——超额高度绑定所选动量窗口，比第 2、3 轮失败更严重"))
+
+    # 8. 任一轮 Calmar 与月胜率同时跌破 0.5 与 55%
+    bad = []
+    for _, r in rounds.iterrows():
+        cal, win = _val(r, "Calmar"), _val(r, "月胜率")
+        if cal is not None and win is not None and cal < 0.5 and win < 0.55:
+            bad.append(int(r["轮次"]))
+    if bad:
+        obs.append(("🔴 单一参数", f"第 {','.join(map(str, bad))} 轮 Calmar 与月胜率同时跌破 0.5 与 55%——该策略仅在单一参数下可用"))
+
+    verdict = "稳健（评级 6.5）" if rating >= 6.5 else "参数拟合（评级 4.0）"
+    return {"observations": obs, "rating": rating, "verdict": verdict}

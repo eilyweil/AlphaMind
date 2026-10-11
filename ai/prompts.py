@@ -42,6 +42,29 @@ def build_announcement_prompt(title: str, content: str) -> list[dict]:
     ]
 
 
+def build_factor_backtest_interpretation_prompt(strategy: str, summary: str) -> list[dict]:
+    """模块5 因子组合回测的「大白话」四段解读（只传结构化指标，不传行情）。"""
+    system = (
+        f"{SYSTEM}\n"
+        "你是量化回测解读助手。请基于给出的结构化回测指标，用中文大白话解读，让非程序员也能看懂。"
+        "只使用给定数字，不臆造数据；结论仅供参考，不替代硬性检验；"
+        "必须提示「历史回测不代表未来收益」，不要给出确定性的买卖建议。"
+    )
+    user = (
+        f"【策略】{strategy}\n"
+        f"【回测指标（结构化数字）】\n{summary}\n\n"
+        "请严格按以下四段输出（用 Markdown 标题）：\n"
+        "## 结论\n（一句话：这个策略到底行不行）\n"
+        "## 亮点\n（超额从哪来、哪块表现好）\n"
+        "## 风险\n（回撤 / 过拟合 / 动量崩溃等风险）\n"
+        "## 建议\n（要不要继续用、该怎么改）"
+    )
+    return [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+    ]
+
+
 def build_financial_prompt(financials: str, forecast: str, last_year: str) -> list[dict]:
     """模块3 财报速解 prompt。"""
     system = (
