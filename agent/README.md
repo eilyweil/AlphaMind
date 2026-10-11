@@ -33,7 +33,7 @@ python -m agent.mcp_server
 ## 接入 Hermes 的三条路径
 
 1. **MCP（推荐，已跑通）**：Hermes 支持「Connect any MCP server」，把 `agent/mcp_server.py`
-   作为 MCP 服务注册进 Hermes，11 个投研工具即出现在 Hermes 的工具清单里。
+   作为 MCP 服务注册进 Hermes，12 个投研工具即出现在 Hermes 的工具清单里。
 2. **人设（SOUL.md）**：把 `soul.md` 内容放到 `~/.hermes/SOUL.md`，让 Hermes 以
    AlphaMind 的身份（铁律 + 行为风格）回答。
 3. **直连飞书**：用 `cards.py` 的卡片模板 + `lark-oapi` 自己写 bot（不推荐，重复造轮子）。
@@ -55,7 +55,7 @@ hermes config set model.key_env "DEEPSEEK_API_KEY"
 # 3. 装飞书 SDK（websocket 长连接依赖）
 ~/.hermes/bin/uv pip install --python ~/.hermes/hermes-agent/venv/bin/python lark-oapi
 
-# 4. 注册 AlphaMind 的 MCP 工具（11 个投研工具）
+# 4. 注册 AlphaMind 的 MCP 工具（12 个投研工具）
 hermes mcp add alphamind --command "$PWD/agent/run_mcp.sh"   # 提示时选 Y
 
 # 5. 人设

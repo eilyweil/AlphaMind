@@ -68,3 +68,25 @@ def announcement_card(results: list) -> dict:
         "header": {"title": {"tag": "plain_text", "content": "公告快读"}, "template": "red"},
         "elements": [_md(body)],
     }
+
+
+def factor_backtest_card(metrics: dict, strategy: str = "多因子增强") -> dict:
+    """因子组合回测卡片：核心指标 + 一句话提示。"""
+    m = metrics or {}
+
+    def _pct(v, plus=False):
+        if v is None:
+            return "暂无"
+        return f"{v * 100:+.2f}%" if plus else f"{v * 100:.2f}%"
+
+    body = "\n".join([
+        f"**年化超额**：{_pct(m.get('年化超额'), plus=True)}",
+        f"**年化收益率**：{_pct(m.get('年化收益率'), plus=True)}　**夏普**：{m.get('夏普比率', 0):.2f}",
+        f"**最大回撤**：{_pct(m.get('最大回撤'))}（基准 {_pct(m.get('基准最大回撤'))}）",
+        f"**月胜率**：{_pct(m.get('月胜率'))}　**单边年换手**：{m.get('单边年换手', 0):.1f} 倍",
+    ])
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {"title": {"tag": "plain_text", "content": f"因子组合回测（沪深300 · {strategy}）"}, "template": "blue"},
+        "elements": [_md(body), {"tag": "note", "elements": [{"tag": "plain_text", "content": _DISCLAIMER}]}],
+    }

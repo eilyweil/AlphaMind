@@ -13,8 +13,8 @@ from utils.config import ROOT
 # ---- 系统人设（与 agent/soul.md 保持一致）----
 SYSTEM = (
     "你是 AlphaMind，一名面向 A 股个人投资者的专业投研分析助手。"
-    "你可以调用工具查询实时行情、估值分位、盈利质量、资金面、财报速解、公告、社区情绪、策略回测、"
-    "持仓组合全景与组合研判，并基于工具返回的数据给出结构化研判。\n"
+    "你可以调用工具查询实时行情、估值分位、盈利质量、资金面、财报速解、公告、社区情绪、个股策略回测、"
+    "沪深300 因子组合回测、持仓组合全景与组合研判，并基于工具返回的数据给出结构化研判。\n"
     "严格规则：\n"
     "1. 只依据工具返回的数据作答，绝不编造未给出的数字；无数据就明说「暂无」。\n"
     "2. 结论要区分「事实（有数据支撑）」与「判断（你的分析）」，并标注风险点与置信度。\n"
@@ -62,6 +62,15 @@ TOOLS = [
         "strategy": {"type": "string", "enum": ["双均线（MA）", "MACD", "RSI 超买超卖", "布林带（BOLL）"], "description": "回测策略，默认双均线（MA）"},
         "period_days": {"type": "integer", "description": "回测区间天数，默认 730（近 2 年）"},
     }, ["code"]),
+    _tool("factor_backtest", "对沪深300 截面做多因子组合月频回测（动量+低波+趋势风控+波动率目标），返回年化超额、夏普、最大回撤、月胜率、分年度收益等指标（首次约几分钟，之后缓存秒开）。", {
+        "top_n": {"type": "integer", "description": "选股数（20/30/50），默认 30"},
+        "window": {"type": "string", "enum": ["12-1", "6-1", "12-6"], "description": "动量窗口，默认 12-1（经典）"},
+        "strategy": {"type": "string", "enum": ["enhanced", "momentum"], "description": "策略：enhanced 多因子增强 / momentum 经典动量，默认 enhanced"},
+        "benchmark": {"type": "string", "enum": ["total_return", "price"], "description": "基准口径：total_return 全收益 H00300 / price 价格指数 000300，默认 total_return"},
+        "vol_target": {"type": "number", "description": "波动率目标（年化 0.1/0.15/0.2），默认 0.15"},
+        "initial_wan": {"type": "number", "description": "初始资金（万元），默认 100"},
+        "interpret": {"type": "boolean", "description": "是否同时生成 AI 大白话解读，默认 false"},
+    }, []),
     _tool("report", "对某只 A 股做一次完整的综合研判：聚合基本面 + 社区情绪，输出结论/支撑数据/风险点/置信度。", {
         "code": _CODE,
         "question": {"type": "string", "description": "用户关心的问题，如「现在估值贵吗」「适合买入吗」"},
@@ -102,6 +111,35 @@ def dispatch(name: str, args: dict):
         )
         # 去掉回测 DataFrame，只保留可序列化的指标与买卖点
         return {k: v for k, v in result.items() if k != "df"} if result else result
+    if name == "factor_backtest":
+        res = e.factor_backtest(
+            top_n=int(args.get("top_n", 30)),
+            window=args.get("window", "12-1"),
+            strategy=args.get("strategy", "enhanced"),
+            benchmark=args.get("benchmark", "total_return"),
+            vol_target=float(args.get("vol_target", 0.15)),
+            initial_wan=float(args.get("initial_wan", 100)),
+        )
+        if not res:
+            return {"message": "数据不足，无法回测"}
+        annual_df = res.get("annual")
+        annual = [{k: (round(v, 4) if isinstance(v, float) else v) for k, v in r.items()}
+                  for r in annual_df.to_dict("records")] if annual_df is not None and not annual_df.empty else []
+        m = res["metrics"]
+        out = {
+            "策略": "多因子增强（动量+低波+趋势风控+波动率目标）" if res.get("strategy", "enhanced") == "enhanced" else "经典 12-1 动量",
+            "参数": {
+                "选股数": int(args.get("top_n", 30)), "动量窗口": args.get("window", "12-1"),
+                "基准": args.get("benchmark", "total_return"),
+                "波动率目标": float(args.get("vol_target", 0.15)),
+                "初始资金(万)": float(args.get("initial_wan", 100)),
+            },
+            "指标": {k: (round(v, 4) if isinstance(v, float) else v) for k, v in m.items()},
+            "分年度收益": annual,
+        }
+        if args.get("interpret"):
+            out["解读"] = e.factor_backtest_interpretation(res)
+        return out
     if name == "report":
         return e.report(code, args["question"])
     if name == "portfolio_overview":
